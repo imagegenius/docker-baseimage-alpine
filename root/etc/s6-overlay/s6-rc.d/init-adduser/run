@@ -1,7 +1,13 @@
 #!/usr/bin/with-contenv bash
+# shellcheck shell=bash
 
-usermod -o -u "${PUID:-911}" abc &>/dev/null
-groupmod -o -g "${PGID:-911}" abc &>/dev/null
+PUID=${PUID:-911}
+PGID=${PGID:-911}
+
+if [[ -z ${LSIO_READ_ONLY_FS} ]] && [[ -z ${LSIO_NON_ROOT_USER} ]]; then
+    groupmod -o -g "$PGID" abc
+    usermod -o -u "$PUID" abc
+fi
 
 echo '
 ╔═══════════════════════════════╗
@@ -20,14 +26,27 @@ if [[ -f /donate.txt ]]; then
   $(cat /donate.txt)"
 fi
 
-echo "╠═══════════════════════════════╣
-  User/Group ID:
+echo '╠═══════════════════════════════╣
+  User/Group ID:'
+if [[ -z ${LSIO_NON_ROOT_USER} ]]; then
+    echo "
   User UID: $(id -u abc)
   User GID: $(id -g abc)"
-
+else
+    echo "
+  User UID: $(stat /run -c %u)
+  User GID: $(stat /run -c %g)
+╠═══════════════════════════════╣"
+fi
+if [[ -f /build_version ]]; then
+    echo "╠═══════════════════════════════╣"
+    cat /build_version
+fi
 echo '╚═══════════════════════════════╝'
 
-chown abc:abc \
-    /app \
-    /config \
-    /defaults
+if [[ -z ${LSIO_READ_ONLY_FS} ]] && [[ -z ${LSIO_NON_ROOT_USER} ]]; then
+    lsiown abc:abc /app
+    lsiown abc:abc /config
+    lsiown abc:abc /defaults
+fi
+    
