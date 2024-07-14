@@ -37,8 +37,7 @@ pipeline {
               if [[ -n "${containers}" ]]; then
                 docker stop ${containers}
               fi
-              docker system prune -af --volumes || :
-           '''
+              docker system prune -af --volumes || : '''
         script{
           env.EXIT_STATUS = ''
           env.IG_RELEASE = sh(
@@ -58,7 +57,7 @@ pipeline {
             returnStdout: true).trim()
           env.CODE_URL = 'https://github.com/' + env.IG_USER + '/' + env.IG_REPO + '/commit/' + env.GIT_COMMIT
           env.PULL_REQUEST = env.CHANGE_ID
-          env.TEMPLATED_FILES = 'Jenkinsfile README.md LICENSE .editorconfig  ./.github/workflows/external_trigger_scheduler.yml  ./.github/workflows/package_trigger_scheduler.yml ./.github/workflows/permissions.yml ./.github/workflows/external_trigger.yml ./.github/workflows/package_trigger.yml'
+          env.TEMPLATED_FILES = 'Jenkinsfile README.md LICENSE .editorconfig  ./.github/workflows/external_trigger_scheduler.yml ./.github/workflows/package_trigger_scheduler.yml ./.github/workflows/permissions.yml ./.github/workflows/external_trigger.yml ./.github/workflows/package_trigger.yml'
         }
         sh '''#! /bin/bash
               echo "The default github branch detected as ${GH_DEFAULT_BRANCH}" '''
@@ -90,7 +89,7 @@ pipeline {
       steps{
         script{
           env.PACKAGE_TAG = sh(
-            script: '''#! /bin/bash
+            script: '''#!/bin/bash
                        if [ -e package_versions.txt ] ; then
                          cat package_versions.txt | md5sum | cut -c1-8
                        else
@@ -195,12 +194,12 @@ pipeline {
         script{
           env.GITHUBIMAGE = 'ghcr.io/' + env.IG_USER + '/igpipepr-' + env.CONTAINER_NAME
           if (env.MULTIARCH == 'true') {
-            env.CI_TAGS = 'amd64-3.20-' + env.EXT_RELEASE_CLEAN + '-pkg-' + env.PACKAGE_TAG + '-pr-' + env.PULL_REQUEST + '|arm64v8-3.20-' + env.EXT_RELEASE_CLEAN + '-pkg-' + env.PACKAGE_TAG + '-pr-' + env.PULL_REQUEST
+            env.CI_TAGS = 'amd64-3.20-' + env.EXT_RELEASE_CLEAN + '-pkg-' + env.PACKAGE_TAG + '-dev-' + env.COMMIT_SHA + '-pr-' + env.PULL_REQUEST + '|arm64v8-3.20-' + env.EXT_RELEASE_CLEAN + '-pkg-' + env.PACKAGE_TAG + '-dev-' + env.COMMIT_SHA + '-pr-' + env.PULL_REQUEST
           } else {
-            env.CI_TAGS = '3.20-' + env.EXT_RELEASE_CLEAN + '-pkg-' + env.PACKAGE_TAG + '-pr-' + env.PULL_REQUEST
+            env.CI_TAGS = '3.20-' + env.EXT_RELEASE_CLEAN + '-pkg-' + env.PACKAGE_TAG + '-dev-' + env.COMMIT_SHA + '-pr-' + env.PULL_REQUEST
           }
-          env.VERSION_TAG = env.EXT_RELEASE_CLEAN + '-pkg-' + env.PACKAGE_TAG + '-pr-' + env.PULL_REQUEST
-          env.META_TAG = '3.20-' + env.EXT_RELEASE_CLEAN + '-pkg-' + env.PACKAGE_TAG + '-pr-' + env.PULL_REQUEST
+          env.VERSION_TAG = env.EXT_RELEASE_CLEAN + '-pkg-' + env.PACKAGE_TAG + '-dev-' + env.COMMIT_SHA + '-pr-' + env.PULL_REQUEST
+          env.META_TAG = '3.20-' + env.EXT_RELEASE_CLEAN + '-pkg-' + env.PACKAGE_TAG + '-dev-' + env.COMMIT_SHA + '-pr-' + env.PULL_REQUEST
           env.EXT_RELEASE_TAG = '3.20-version-' + env.EXT_RELEASE_CLEAN
           env.CODE_URL = 'https://github.com/' + env.IG_USER + '/' + env.IG_REPO + '/pull/' + env.PULL_REQUEST
         }
@@ -219,16 +218,18 @@ pipeline {
           script{
             env.SHELLCHECK_URL = 'https://ci-tests.imagegenius.io/' + env.CONTAINER_NAME + '/' + env.META_TAG + '/shellcheck-result.xml'
           }
-          sh '''curl -sL https://raw.githubusercontent.com/linuxserver/docker-jenkins-builder/master/checkrun.sh | /bin/bash'''
+          sh '''curl -sL https://raw.githubusercontent.com/imagegenius/docker-jenkins-builder/master/checkrun.sh | /bin/bash'''
           sh '''#! /bin/bash
                 docker run --rm \
                   -v ${WORKSPACE}:/mnt \
                   -e AWS_ACCESS_KEY_ID="${S3_KEY}" \
                   -e AWS_SECRET_ACCESS_KEY="${S3_SECRET}" \
-                  ghcr.io/linuxserver/baseimage-alpine:3.17 s6-envdir -fn -- /var/run/s6/container_environment /bin/bash -c "\
-                    apk add --no-cache py3-pip && \
-                    pip install s3cmd && \
-                    s3cmd --host=s3.imagegenius.io --host-bucket= put -m text/xml /mnt/shellcheck-result.xml s3://ci-tests.imagegenius.io/${GITHUBIMAGE}/${META_TAG}/shellcheck-result.xml" || :
+                  ghcr.io/imagegenius/baseimage-alpine:3.19 s6-envdir -fn -- /var/run/s6/container_environment /bin/bash -c "\
+                   apk add --no-cache python3 && \
+                    python3 -m venv /lsiopy && \
+                    pip install --no-cache-dir -U pip && \
+                    pip install --no-cache-dir s3cmd && \
+                    s3cmd --host=s3.imagegenius.io --host-bucket= put -m text/xml /mnt/shellcheck-result.xml s3://ci-tests.imagegenius.io/${CONTAINER_NAME}/${META_TAG}/shellcheck-result.xml" || :
              '''
         }
       }
@@ -247,12 +248,15 @@ pipeline {
               set -e
               TEMPDIR=$(mktemp -d)
               docker pull ghcr.io/imagegenius/jenkins-builder:latest
-              mkdir -p ${TEMPDIR}/source
-              git clone https://ImageGeniusCI:${GITHUB_TOKEN}@github.com/${IG_USER}/${IG_REPO}.git ${TEMPDIR}/source
-              cd ${TEMPDIR}/source
-              git checkout -f 3.20
-              docker run --rm -e CONTAINER_NAME=${CONTAINER_NAME} -e GITHUB_BRANCH=3.20 -v ${TEMPDIR}/source:/tmp -v ${TEMPDIR}:/ansible/jenkins ghcr.io/imagegenius/jenkins-builder:latest 
-              # Stage 1 - Jenkinsfile update
+              # Cloned repo paths for templating:
+              # ${TEMPDIR}/docker-${CONTAINER_NAME}: Cloned branch 3.20 of ${IG_USER}/${IG_REPO} for running the jenkins builder on
+              # ${TEMPDIR}/repo/${IG_REPO}: Cloned branch 3.20 of ${IG_USER}/${IG_REPO} for commiting various templated file changes and pushing back to Github
+              # ${TEMPDIR}/docs/docker-documentation: Cloned docs repo for pushing docs updates to Github
+              # ${TEMPDIR}/unraid/docker-templates: Cloned docker-templates repo to check for logos
+              # ${TEMPDIR}/unraid/templates: Cloned templates repo for commiting unraid template changes and pushing back to Github
+              git clone --branch 3.20 --depth 1 https://ImageGeniusCI:${GITHUB_TOKEN}@github.com/${IG_USER}/${IG_REPO}.git ${TEMPDIR}/docker-${CONTAINER_NAME}
+              docker run --rm -v ${TEMPDIR}/docker-${CONTAINER_NAME}:/tmp -e LOCAL=true -e PUID=$(id -u) -e PGID=$(id -g) ghcr.io/imagegenius/jenkins-builder:latest 
+              echo "Starting Stage 1 - Jenkinsfile update"
               if [[ "$(md5sum Jenkinsfile | awk '{ print $1 }')" != "$(md5sum ${TEMPDIR}/docker-${CONTAINER_NAME}/Jenkinsfile | awk '{ print $1 }')" ]]; then
                 mkdir -p ${TEMPDIR}/repo
                 git clone https://ImageGeniusCI:${GITHUB_TOKEN}@github.com/${IG_USER}/${IG_REPO}.git ${TEMPDIR}/repo/${IG_REPO}
@@ -261,16 +265,17 @@ pipeline {
                 cp ${TEMPDIR}/docker-${CONTAINER_NAME}/Jenkinsfile ${TEMPDIR}/repo/${IG_REPO}/
                 git add Jenkinsfile
                 git commit -m 'Bot Updating Templated Files'
-                git push https://ImageGeniusCI:${GITHUB_TOKEN}@github.com/${IG_USER}/${IG_REPO}.git --all
+                git pull https://ImageGeniusCI:${GITHUB_TOKEN}@github.com/${IG_USER}/${IG_REPO}.git 3.20
+                git push https://ImageGeniusCI:${GITHUB_TOKEN}@github.com/${IG_USER}/${IG_REPO}.git 3.20
                 echo "true" > /tmp/${COMMIT_SHA}-${BUILD_NUMBER}
-                echo "Updating Jenkinsfile"
+                echo "Updating Jenkinsfile and exiting build, new one will trigger based on commit"
                 rm -Rf ${TEMPDIR}
                 exit 0
               else
                 echo "Jenkinsfile is up to date."
               fi
-              # Stage 2 - Delete old templates
-              OLD_TEMPLATES=".github/ISSUE_TEMPLATE.md .github/ISSUE_TEMPLATE/issue.bug.md .github/ISSUE_TEMPLATE/issue.feature.md .github/workflows/call_invalid_helper.yml .github/workflows/stale.yml Dockerfile.armhf"
+              echo "Starting Stage 2 - Delete old templates"
+              OLD_TEMPLATES=".github/ISSUE_TEMPLATE.md .github/ISSUE_TEMPLATE/issue.bug.md .github/ISSUE_TEMPLATE/issue.feature.md .github/workflows/call_invalid_helper.yml .github/workflows/stale.yml"
               for i in ${OLD_TEMPLATES}; do
                 if [[ -f "${i}" ]]; then
                   TEMPLATES_TO_DELETE="${i} ${TEMPLATES_TO_DELETE}"
@@ -285,15 +290,16 @@ pipeline {
                   git rm "${i}"
                 done
                 git commit -m 'Bot Updating Templated Files'
-                git push https://ImageGeniusCI:${GITHUB_TOKEN}@github.com/${IG_USER}/${IG_REPO}.git --all
+                git pull https://ImageGeniusCI:${GITHUB_TOKEN}@github.com/${IG_USER}/${IG_REPO}.git 3.20
+                git push https://ImageGeniusCI:${GITHUB_TOKEN}@github.com/${IG_USER}/${IG_REPO}.git 3.20
                 echo "true" > /tmp/${COMMIT_SHA}-${BUILD_NUMBER}
-                echo "Deleting old and deprecated templates"
+                echo "Deleting old/deprecated templates and exiting build, new one will trigger based on commit"
                 rm -Rf ${TEMPDIR}
                 exit 0
               else
                 echo "No templates to delete"
               fi
-              # Stage 3 - Update templates
+              echo "Starting Stage 3 - Update templates"
               CURRENTHASH=$(grep -hs ^ ${TEMPLATED_FILES} | md5sum | cut -c1-8)
               cd ${TEMPDIR}/docker-${CONTAINER_NAME}
               NEWHASH=$(grep -hs ^ ${TEMPLATED_FILES} | md5sum | cut -c1-8)
@@ -314,11 +320,17 @@ pipeline {
                 fi
                 git add readme-vars.yml ${TEMPLATED_FILES}
                 git commit -m 'Bot Updating Templated Files'
-                git push https://ImageGeniusCI:${GITHUB_TOKEN}@github.com/${IG_USER}/${IG_REPO}.git --all
+                git pull https://ImageGeniusCI:${GITHUB_TOKEN}@github.com/${IG_USER}/${IG_REPO}.git 3.20
+                git push https://ImageGeniusCI:${GITHUB_TOKEN}@github.com/${IG_USER}/${IG_REPO}.git 3.20
                 echo "true" > /tmp/${COMMIT_SHA}-${BUILD_NUMBER}
+                echo "Updating templates and exiting build, new one will trigger based on commit"
+                rm -Rf ${TEMPDIR}
+                exit 0
               else
                 echo "false" > /tmp/${COMMIT_SHA}-${BUILD_NUMBER}
+                echo "No templates to update"
               fi
+              echo "Starting Stage 4 - External repo update: Unraid Template"
               rm -Rf ${TEMPDIR}'''
         script{
           env.FILES_UPDATED = sh(
@@ -389,6 +401,7 @@ pipeline {
           --label \"org.opencontainers.image.title=Baseimage-alpine\" \
           --label \"org.opencontainers.image.description=baseimage-alpine image by imagegenius.io\" \
           --no-cache --pull -t ${GITHUBIMAGE}:${META_TAG} --platform=linux/amd64 \
+          --provenance=false --sbom=false \
           --build-arg ${BUILD_VERSION_ARG}=${EXT_RELEASE} --build-arg VERSION=\"${VERSION_TAG}\" --build-arg BUILD_DATE=${GITHUB_DATE} ."
       }
     }
@@ -418,6 +431,7 @@ pipeline {
               --label \"org.opencontainers.image.title=Baseimage-alpine\" \
               --label \"org.opencontainers.image.description=baseimage-alpine image by imagegenius.io\" \
               --no-cache --pull -t ${GITHUBIMAGE}:amd64-${META_TAG} --platform=linux/amd64 \
+              --provenance=false --sbom=false \
               --build-arg ${BUILD_VERSION_ARG}=${EXT_RELEASE} --build-arg VERSION=\"${VERSION_TAG}\" --build-arg BUILD_DATE=${GITHUB_DATE} ."
           }
         }
@@ -444,6 +458,7 @@ pipeline {
               --label \"org.opencontainers.image.title=Baseimage-alpine\" \
               --label \"org.opencontainers.image.description=baseimage-alpine image by imagegenius.io\" \
               --no-cache --pull -f Dockerfile.aarch64 -t ${GITHUBIMAGE}:arm64v8-${META_TAG} --platform=linux/arm64 \
+              --provenance=false --sbom=false \
               --build-arg ${BUILD_VERSION_ARG}=${EXT_RELEASE} --build-arg VERSION=\"${VERSION_TAG}\" --build-arg BUILD_DATE=${GITHUB_DATE} ."
             sh "docker tag ${GITHUBIMAGE}:arm64v8-${META_TAG} ghcr.io/imagegenius/igdev-buildcache:arm64v8-${COMMIT_SHA}-${BUILD_NUMBER}"
             retry(5) {
@@ -470,7 +485,7 @@ pipeline {
         sh '''#! /bin/bash
               set -e
               TEMPDIR=$(mktemp -d)
-              if [ "${MULTIARCH}" == "true" ] && [ "${PACKAGE_CHECK}" == "false" ]; then
+              if [ "${MULTIARCH}" == "true" ] && [ "${PACKAGE_CHECK}" != "true" ]; then
                 LOCAL_CONTAINER=${GITHUBIMAGE}:amd64-${META_TAG}
               else
                 LOCAL_CONTAINER=${GITHUBIMAGE}:${META_TAG}
@@ -568,7 +583,6 @@ pipeline {
                 -v /var/run/docker.sock:/var/run/docker.sock \
                 -e IMAGE=\"${GITHUBIMAGE}\" \
                 -e CONTAINER=\"${CONTAINER_NAME}\" \
-                -e DELAY_START=\"${CI_DELAY:-30}\" \
                 -e TAGS=\"${CI_TAGS}\" \
                 -e META_TAG=\"${META_TAG}\" \
                 -e PORT=\"${CI_PORT}\" \
@@ -631,10 +645,8 @@ pipeline {
                   docker pull ghcr.io/imagegenius/igdev-buildcache:arm64v8-${COMMIT_SHA}-${BUILD_NUMBER}
                   docker tag ghcr.io/imagegenius/igdev-buildcache:arm64v8-${COMMIT_SHA}-${BUILD_NUMBER} ${GITHUBIMAGE}:arm64v8-${META_TAG}
                 fi
-                docker tag ${GITHUBIMAGE}:amd64-${META_TAG} ${GITHUBIMAGE}:amd64-${META_TAG}
                 docker tag ${GITHUBIMAGE}:amd64-${META_TAG} ${GITHUBIMAGE}:amd64-3.20
                 docker tag ${GITHUBIMAGE}:amd64-${META_TAG} ${GITHUBIMAGE}:amd64-${EXT_RELEASE_TAG}
-                docker tag ${GITHUBIMAGE}:arm64v8-${META_TAG} ${GITHUBIMAGE}:arm64v8-${META_TAG}
                 docker tag ${GITHUBIMAGE}:arm64v8-${META_TAG} ${GITHUBIMAGE}:arm64v8-3.20
                 docker tag ${GITHUBIMAGE}:arm64v8-${META_TAG} ${GITHUBIMAGE}:arm64v8-${EXT_RELEASE_TAG}
                 if [ -n "${SEMVER}" ]; then
@@ -651,35 +663,11 @@ pipeline {
                   docker push ${GITHUBIMAGE}:amd64-${SEMVER}
                   docker push ${GITHUBIMAGE}:arm64v8-${SEMVER}
                 fi
-                docker manifest push --purge ${GITHUBIMAGE}:3.20 || :
-                docker manifest create ${GITHUBIMAGE}:3.20 ${GITHUBIMAGE}:amd64-3.20 ${GITHUBIMAGE}:arm64v8-3.20
-                docker manifest annotate ${GITHUBIMAGE}:3.20 ${GITHUBIMAGE}:arm64v8-3.20 --os linux --arch arm64 --variant v8
-                docker manifest push --purge ${GITHUBIMAGE}:${META_TAG} || :
-                docker manifest create ${GITHUBIMAGE}:${META_TAG} ${GITHUBIMAGE}:amd64-${META_TAG} ${GITHUBIMAGE}:arm64v8-${META_TAG}
-                docker manifest annotate ${GITHUBIMAGE}:${META_TAG} ${GITHUBIMAGE}:arm64v8-${META_TAG} --os linux --arch arm64 --variant v8
-                docker manifest push --purge ${GITHUBIMAGE}:${EXT_RELEASE_TAG} || :
-                docker manifest create ${GITHUBIMAGE}:${EXT_RELEASE_TAG} ${GITHUBIMAGE}:amd64-${EXT_RELEASE_TAG} ${GITHUBIMAGE}:arm64v8-${EXT_RELEASE_TAG}
-                docker manifest annotate ${GITHUBIMAGE}:${EXT_RELEASE_TAG} ${GITHUBIMAGE}:arm64v8-${EXT_RELEASE_TAG} --os linux --arch arm64 --variant v8
+                docker buildx imagetools create -t ${GITHUBIMAGE}:3.20 ${GITHUBIMAGE}:amd64-3.20 ${GITHUBIMAGE}:arm64v8-3.20
+                docker buildx imagetools create -t ${GITHUBIMAGE}:${META_TAG} ${GITHUBIMAGE}:amd64-${META_TAG} ${GITHUBIMAGE}:arm64v8-${META_TAG}
+                docker buildx imagetools create -t ${GITHUBIMAGE}:${EXT_RELEASE_TAG} ${GITHUBIMAGE}:amd64-${EXT_RELEASE_TAG} ${GITHUBIMAGE}:arm64v8-${EXT_RELEASE_TAG}
                 if [ -n "${SEMVER}" ]; then
-                  docker manifest push --purge ${GITHUBIMAGE}:${SEMVER} || :
-                  docker manifest create ${GITHUBIMAGE}:${SEMVER} ${GITHUBIMAGE}:amd64-${SEMVER} ${GITHUBIMAGE}:arm64v8-${SEMVER}
-                  docker manifest annotate ${GITHUBIMAGE}:${SEMVER} ${GITHUBIMAGE}:arm64v8-${SEMVER} --os linux --arch arm64 --variant v8
-                fi
-                token=$(curl -sX GET "https://ghcr.io/token?scope=repository%3Aimagegenius%2F${CONTAINER_NAME}%3Apull" | jq -r '.token')
-                digest=$(curl -s \
-                  --header "Accept: application/vnd.docker.distribution.manifest.v2+json" \
-                  --header "Authorization: Bearer ${token}" \
-                  "https://ghcr.io/v2/imagegenius/${CONTAINER_NAME}/manifests/arm32v7-3.20")
-                if [[ $(echo "$digest" | jq -r '.layers') != "null" ]]; then
-                  docker manifest push --purge ${GITHUBIMAGE}:arm32v7-3.20 || :
-                  docker manifest create ${GITHUBIMAGE}:arm32v7-3.20 ${GITHUBIMAGE}:amd64-3.20
-                  docker manifest push --purge ${GITHUBIMAGE}:arm32v7-3.20
-                fi
-                docker manifest push --purge ${GITHUBIMAGE}:3.20
-                docker manifest push --purge ${GITHUBIMAGE}:${META_TAG} 
-                docker manifest push --purge ${GITHUBIMAGE}:${EXT_RELEASE_TAG} 
-                if [ -n "${SEMVER}" ]; then
-                  docker manifest push --purge ${GITHUBIMAGE}:${SEMVER} 
+                  docker buildx imagetools create -t ${GITHUBIMAGE}:${SEMVER} ${GITHUBIMAGE}:amd64-${SEMVER} ${GITHUBIMAGE}:arm64v8-${SEMVER}
                 fi
              '''
           }
